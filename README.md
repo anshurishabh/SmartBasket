@@ -16,7 +16,7 @@ cd backend
 npm install
 npm run seed     # Run once to seed store catalog and inventory
 npm run dev      # Runs Express + Socket.IO on http://localhost:5000
-
+---
 ### Start Frontend (Terminal 2)
 
 cd frontend
@@ -31,8 +31,6 @@ cd ml-recommender && pip install pandas pymongo python-dotenv && python train_re
 
 
 Run Concurrency Stress Test (25 Parallel Checkouts):
-
-Bash
 
 cd backend && npm run stress-test
 
