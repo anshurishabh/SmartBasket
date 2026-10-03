@@ -1,14 +1,4 @@
-import { Schema, model, Document, Types } from 'mongoose';
-
-export type OrderStatus =
-  | 'PLACED'
-  | 'PACKING'
-  | 'PACKED'
-  | 'ASSIGNED'
-  | 'PICKED_UP'
-  | 'DELIVERED'
-  | 'CANCELLED'
-  | 'REFUNDED';
+﻿import { Schema, model, Document, Types } from 'mongoose';
 
 export interface IOrderItem {
   productId: Types.ObjectId;
@@ -20,33 +10,40 @@ export interface IOrderItem {
 export interface IOrder extends Document {
   userId: Types.ObjectId;
   storeId: Types.ObjectId;
-  riderId?: Types.ObjectId;
   items: IOrderItem[];
   totalPaise: number;
-  status: OrderStatus;
+  status: 'PLACED' | 'PACKING' | 'READY_FOR_PICKUP' | 'OUT_FOR_DELIVERY' | 'DELIVERED' | 'CANCELLED';
   statusHistory: Array<{
-    status: OrderStatus;
+    status: string;
     updatedAt: Date;
     actor: string;
   }>;
+  customerDetails: {
+    name: string;
+    phone: string;
+    deliveryAddress: string;
+  };
+  storeDetails: {
+    name: string;
+    addressLine: string;
+    phone: string;
+  };
+  riderDetails?: {
+    riderId?: Types.ObjectId;
+    name?: string;
+    phone?: string;
+    vehicleNo?: string;
+  };
   confirmedAt?: Date;
   cancelUntil?: Date;
   idempotencyKey: string;
   deliveryOtp: string;
-  address: {
-    addressLine: string;
-    location: {
-      type: 'Point';
-      coordinates: [number, number];
-    };
-  };
 }
 
 const OrderSchema = new Schema<IOrder>(
   {
     userId: { type: Schema.Types.ObjectId, ref: 'User', required: true },
     storeId: { type: Schema.Types.ObjectId, ref: 'Store', required: true },
-    riderId: { type: Schema.Types.ObjectId, ref: 'User' },
     items: [
       {
         productId: { type: Schema.Types.ObjectId, ref: 'Product', required: true },
@@ -58,7 +55,7 @@ const OrderSchema = new Schema<IOrder>(
     totalPaise: { type: Number, required: true },
     status: {
       type: String,
-      enum: ['PLACED', 'PACKING', 'PACKED', 'ASSIGNED', 'PICKED_UP', 'DELIVERED', 'CANCELLED', 'REFUNDED'],
+      enum: ['PLACED', 'PACKING', 'READY_FOR_PICKUP', 'OUT_FOR_DELIVERY', 'DELIVERED', 'CANCELLED'],
       default: 'PLACED',
     },
     statusHistory: [
@@ -68,17 +65,26 @@ const OrderSchema = new Schema<IOrder>(
         actor: { type: String, required: true },
       },
     ],
+    customerDetails: {
+      name: { type: String, required: true },
+      phone: { type: String, required: true },
+      deliveryAddress: { type: String, required: true },
+    },
+    storeDetails: {
+      name: { type: String, required: true },
+      addressLine: { type: String, required: true },
+      phone: { type: String, required: true },
+    },
+    riderDetails: {
+      riderId: { type: Schema.Types.ObjectId, ref: 'User' },
+      name: { type: String },
+      phone: { type: String },
+      vehicleNo: { type: String },
+    },
     confirmedAt: { type: Date },
     cancelUntil: { type: Date },
     idempotencyKey: { type: String, required: true, unique: true },
     deliveryOtp: { type: String, required: true },
-    address: {
-      addressLine: { type: String, required: true },
-      location: {
-        type: { type: String, enum: ['Point'], default: 'Point' },
-        coordinates: { type: [Number], required: true },
-      },
-    },
   },
   { timestamps: true }
 );

@@ -1,24 +1,24 @@
-import { Schema, model, Document } from 'mongoose';
+﻿import { Schema, model, Document } from 'mongoose';
 
 export interface IUser extends Document {
   name: string;
   email: string;
   passwordHash: string;
-  role: 'customer' | 'rider' | 'store_staff' | 'admin';
   phone: string;
+  role: 'customer' | 'rider' | 'store_admin';
+  vehicleNo?: string;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 const UserSchema = new Schema<IUser>(
   {
-    name: { type: String, required: true, trim: true },
-    email: { type: String, required: true, unique: true, lowercase: true, trim: true },
+    name: { type: String, required: true },
+    email: { type: String, required: true, unique: true, lowercase: true, index: true },
     passwordHash: { type: String, required: true },
-    role: {
-      type: String,
-      enum: ['customer', 'rider', 'store_staff', 'admin'],
-      default: 'customer',
-    },
-    phone: { type: String, default: '' },
+    phone: { type: String, required: true },
+    role: { type: String, enum: ['customer', 'rider', 'store_admin'], default: 'customer' },
+    vehicleNo: { type: String, default: '' },
   },
   { timestamps: true }
 );

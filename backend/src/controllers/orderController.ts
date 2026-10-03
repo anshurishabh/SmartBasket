@@ -5,14 +5,20 @@ import { Order } from '../models/Order';
 import { Store } from '../models/Store';
 import { Product } from '../models/Product';
 import { Inventory } from '../models/Inventory';
-import { evaluateStoreHours } from '../utils/storeHours';
+import { User } from '../models/User';
 
 export async function placeOrder(req: AuthRequest, res: Response): Promise<void> {
   const session = await mongoose.startSession();
   session.startTransaction();
 
   try {
-    const userId = req.user?.userId;
+    const userId = req.user?.userId || req.user?.id;
+    if (!userId) {
+      res.status(401).json({ code: 'UNAUTHORIZED', message: 'Session expired. Please login again.' });
+      await session.abortTransaction();
+      return;
+    }
+
     const { storeId, items, address, idempotencyKey } = req.body;
 
     if (!items || !items.length || !storeId || !address || !idempotencyKey) {
@@ -28,19 +34,13 @@ export async function placeOrder(req: AuthRequest, res: Response): Promise<void>
       return;
     }
 
-    const store = await Store.findById(storeId).session(session);
-    if (!store) {
-      res.status(404).json({ code: 'STORE_NOT_FOUND', message: 'Selected dark store does not exist.' });
-      await session.abortTransaction();
-      return;
-    }
+    const [store, customer] = await Promise.all([
+      Store.findById(storeId).session(session),
+      User.findById(userId).session(session),
+    ]);
 
-    const operationalStatus = evaluateStoreHours(store);
-    if (!operationalStatus.canAcceptOrders) {
-      res.status(400).json({
-        code: 'STORE_CLOSED',
-        message: operationalStatus.reason || 'The store is currently not accepting orders.',
-      });
+    if (!store) {
+      res.status(404).json({ code: 'STORE_NOT_FOUND', message: 'Dark store not found.' });
       await session.abortTransaction();
       return;
     }
@@ -51,7 +51,7 @@ export async function placeOrder(req: AuthRequest, res: Response): Promise<void>
     for (const item of items) {
       const product = await Product.findById(item.productId).session(session);
       if (!product || !product.isActive) {
-        throw new Error(`Product ${item.productId} is unavailable.`);
+        throw new Error('Product unavailable.');
       }
 
       const inventoryUpdate = await Inventory.findOneAndUpdate(
@@ -61,11 +61,11 @@ export async function placeOrder(req: AuthRequest, res: Response): Promise<void>
           $expr: { $gte: [{$subtract: ['$stock', '$reserved'] }, item.quantity] },
         },
         { $inc: { reserved: item.quantity } },
-        { session, new: true }
+        { session, returnDocument: 'after' }
       );
 
       if (!inventoryUpdate) {
-        throw new Error(`Item ${product.name} just went out of stock.`);
+        throw new Error(`Item ${product.name} went out of stock.`);
       }
 
       calculatedTotalPaise += product.pricePaise * item.quantity;
@@ -84,23 +84,26 @@ export async function placeOrder(req: AuthRequest, res: Response): Promise<void>
     const [order] = await Order.create(
       [
         {
-          userId,
+          userId: new mongoose.Types.ObjectId(userId),
           storeId,
           items: orderItems,
           totalPaise: calculatedTotalPaise,
           status: 'PLACED',
           statusHistory: [{ status: 'PLACED', updatedAt: now, actor: 'customer' }],
+          customerDetails: {
+            name: customer?.name || 'Customer',
+            phone: customer?.phone || '+91 9839012345',
+            deliveryAddress: address.addressLine || 'Lucknow, Uttar Pradesh',
+          },
+          storeDetails: {
+            name: store.name,
+            addressLine: store.addressLine,
+            phone: store.phone,
+          },
           confirmedAt: now,
           cancelUntil,
           idempotencyKey,
           deliveryOtp,
-          address: {
-            addressLine: address.addressLine,
-            location: {
-              type: 'Point',
-              coordinates: address.coordinates || [80.9995, 26.8525],
-            },
-          },
         },
       ],
       { session }
@@ -114,19 +117,10 @@ export async function placeOrder(req: AuthRequest, res: Response): Promise<void>
       io.to(`store:${storeId}`).emit('stock_updated', { storeId });
     }
 
-    res.status(201).json({
-      success: true,
-      order,
-      cancelUntil: cancelUntil.toISOString(),
-      serverNow: now.toISOString(),
-    });
+    res.status(201).json({ success: true, order, cancelUntil: cancelUntil.toISOString() });
   } catch (error: any) {
     await session.abortTransaction();
-    console.error('Order creation error:', error);
-    res.status(400).json({
-      code: 'ORDER_FAILED',
-      message: error.message || 'Unable to place order due to stock unavailability.',
-    });
+    res.status(400).json({ code: 'ORDER_FAILED', message: error.message });
   } finally {
     session.endSession();
   }
@@ -138,29 +132,19 @@ export async function cancelOrder(req: AuthRequest, res: Response): Promise<void
 
   try {
     const { id } = req.params;
-    const userId = req.user?.userId;
+    const userId = req.user?.userId || req.user?.id;
     const now = new Date();
 
     const order = await Order.findOneAndUpdate(
+      { _id: id, userId, status: 'PLACED', cancelUntil: { $gte: now } },
       {
-        _id: id,
-        userId,
-        status: 'PLACED',
-        cancelUntil: { $gte: now },
+        $set: { status: 'CANCELLED' },$push: { statusHistory: { status: 'CANCELLED', updatedAt: now, actor: 'customer' } },
       },
-      {
-        $set: { status: 'CANCELLED' },$push: {
-          statusHistory: { status: 'CANCELLED', updatedAt: now, actor: 'customer' },
-        },
-      },
-      { session, new: true }
+      { session, returnDocument: 'after' }
     );
 
     if (!order) {
-      res.status(400).json({
-        code: 'CANCELLATION_EXPIRED',
-        message: "Orders can't be cancelled 10 seconds after they're placed.",
-      });
+      res.status(400).json({ code: 'CANCELLATION_EXPIRED', message: 'Cancellation window expired.' });
       await session.abortTransaction();
       return;
     }
@@ -177,36 +161,29 @@ export async function cancelOrder(req: AuthRequest, res: Response): Promise<void
 
     const io = req.app.get('io');
     if (io) {
-      io.to(`order:${order._id}`).emit('order_cancelled', { orderId: order._id });
+      io.to(`order:${order._id}`).emit('status_changed', { orderId: order._id, status: 'CANCELLED' });
       io.to(`store:${order.storeId}`).emit('stock_updated', { storeId: order.storeId });
     }
 
-    res.status(200).json({
-      success: true,
-      message: 'Order cancelled successfully. Full refund initiated.',
-      order,
-    });
-  } catch (error) {
+    res.status(200).json({ success: true, message: 'Order cancelled.', order });
+  } catch (e) {
     await session.abortTransaction();
-    console.error('Order cancel error:', error);
-    res.status(500).json({ code: 'SERVER_ERROR', message: 'Unable to cancel order.' });
+    res.status(500).json({ code: 'SERVER_ERROR', message: 'Failed to cancel.' });
   } finally {
     session.endSession();
   }
 }
 
-// Store Staff: Get Active Store Orders
 export async function getStoreOrders(req: AuthRequest, res: Response): Promise<void> {
   try {
-    const { storeId } = req.params;
-    const orders = await Order.find({ storeId }).sort({ createdAt: -1 }).limit(30);
+    const storeId = req.params.storeId || req.user?.storeId;
+    const orders = await Order.find({ storeId }).sort({ createdAt: -1 }).limit(50);
     res.status(200).json({ success: true, count: orders.length, orders });
-  } catch (error) {
-    res.status(500).json({ code: 'SERVER_ERROR', message: 'Unable to load store orders.' });
+  } catch (e) {
+    res.status(500).json({ code: 'SERVER_ERROR', message: 'Failed to get orders' });
   }
 }
 
-// Update Order Status (PACKING, READY_FOR_PICKUP, OUT_FOR_DELIVERY)
 export async function updateOrderStatus(req: AuthRequest, res: Response): Promise<void> {
   try {
     const { id } = req.params;
@@ -218,30 +195,61 @@ export async function updateOrderStatus(req: AuthRequest, res: Response): Promis
       {
         $set: { status },$push: { statusHistory: { status, updatedAt: now, actor: actor || 'staff' } },
       },
-      { new: true }
+      { returnDocument: 'after' }
     );
 
     if (!order) {
-      res.status(404).json({ code: 'ORDER_NOT_FOUND', message: 'Order not found.' });
+      res.status(404).json({ code: 'ORDER_NOT_FOUND', message: 'Order not found' });
       return;
     }
 
     const io = req.app.get('io');
     if (io) {
-      io.to(`order:${order._id}`).emit('status_changed', { orderId: order._id, status });
+      io.to(`order:${order._id}`).emit('status_changed', { orderId: order._id, status, order });
       io.to(`store:${order.storeId}`).emit('store_order_updated', order);
       if (status === 'READY_FOR_PICKUP') {
-        io.emit('rider_offer', order); // Broadcast to riders
+        io.emit('rider_offer', order);
       }
     }
 
     res.status(200).json({ success: true, order });
-  } catch (error) {
-    res.status(500).json({ code: 'SERVER_ERROR', message: 'Failed to update order status.' });
+  } catch (e) {
+    res.status(500).json({ code: 'SERVER_ERROR', message: 'Failed to update status' });
   }
 }
 
-// Rider: Complete Delivery using OTP verification
+export async function assignRiderToOrder(req: AuthRequest, res: Response): Promise<void> {
+  try {
+    const { id } = req.params;
+    const riderId = req.user?.userId || req.user?.id;
+    const rider = await User.findById(riderId);
+
+    if (!rider) {
+      res.status(404).json({ code: 'RIDER_NOT_FOUND', message: 'Rider not found' });
+      return;
+    }
+
+    const now = new Date();
+    const order = await Order.findByIdAndUpdate(
+      id,
+      {
+        $set: {           status: 'OUT_FOR_DELIVERY',           riderDetails: {             riderId: rider._id,             name: rider.name,             phone: rider.phone,             vehicleNo: rider.vehicleNo || 'UP-32-SB-2026',           },         },$push: { statusHistory: { status: 'OUT_FOR_DELIVERY', updatedAt: now, actor: 'rider' } },
+      },
+      { returnDocument: 'after' }
+    );
+
+    const io = req.app.get('io');
+    if (io && order) {
+      io.to(`order:${order._id}`).emit('status_changed', { orderId: order._id, status: 'OUT_FOR_DELIVERY', order });
+      io.to(`store:${order.storeId}`).emit('store_order_updated', order);
+    }
+
+    res.status(200).json({ success: true, order });
+  } catch (e) {
+    res.status(500).json({ code: 'SERVER_ERROR', message: 'Failed to assign rider' });
+  }
+}
+
 export async function completeDeliveryWithOtp(req: AuthRequest, res: Response): Promise<void> {
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -252,13 +260,13 @@ export async function completeDeliveryWithOtp(req: AuthRequest, res: Response): 
 
     const order = await Order.findById(id).session(session);
     if (!order) {
-      res.status(404).json({ code: 'ORDER_NOT_FOUND', message: 'Order not found.' });
+      res.status(404).json({ code: 'ORDER_NOT_FOUND', message: 'Order not found' });
       await session.abortTransaction();
       return;
     }
 
     if (order.deliveryOtp !== otp) {
-      res.status(400).json({ code: 'INVALID_OTP', message: 'Incorrect OTP. Please confirm with customer.' });
+      res.status(400).json({ code: 'INVALID_OTP', message: 'Incorrect OTP. Ask the customer.' });
       await session.abortTransaction();
       return;
     }
@@ -268,7 +276,6 @@ export async function completeDeliveryWithOtp(req: AuthRequest, res: Response): 
     order.statusHistory.push({ status: 'DELIVERED', updatedAt: now, actor: 'rider' });
     await order.save({ session });
 
-    // Deduct stock permanently from inventory
     for (const item of order.items) {
       await Inventory.findOneAndUpdate(
         { storeId: order.storeId, productId: item.productId },
@@ -281,12 +288,12 @@ export async function completeDeliveryWithOtp(req: AuthRequest, res: Response): 
 
     const io = req.app.get('io');
     if (io) {
-      io.to(`order:${order._id}`).emit('status_changed', { orderId: order._id, status: 'DELIVERED' });
+      io.to(`order:${order._id}`).emit('status_changed', { orderId: order._id, status: 'DELIVERED', order });
       io.to(`store:${order.storeId}`).emit('store_order_updated', order);
     }
 
-    res.status(200).json({ success: true, message: 'Order delivered successfully!', order });
-  } catch (error) {
+    res.status(200).json({ success: true, message: 'Delivered successfully!', order });
+  } catch (e) {
     await session.abortTransaction();
     res.status(500).json({ code: 'SERVER_ERROR', message: 'Delivery confirmation failed.' });
   } finally {
@@ -296,36 +303,13 @@ export async function completeDeliveryWithOtp(req: AuthRequest, res: Response): 
 
 export async function getOrderById(req: AuthRequest, res: Response): Promise<void> {
   try {
-    const { id } = req.params;
-    const order = await Order.findById(id);
+    const order = await Order.findById(req.params.id);
     if (!order) {
-      res.status(404).json({ code: 'ORDER_NOT_FOUND', message: 'Order not found.' });
+      res.status(404).json({ code: 'ORDER_NOT_FOUND', message: 'Order not found' });
       return;
     }
-
-    const now = new Date();
-    const canCancel = order.status === 'PLACED' && order.cancelUntil ? now <= order.cancelUntil : false;
-
-    res.status(200).json({
-      success: true,
-      order,
-      serverNow: now.toISOString(),
-      canCancel,
-      secondsRemaining: canCancel && order.cancelUntil
-        ? Math.max(0, Math.ceil((order.cancelUntil.getTime() - now.getTime()) / 1000))
-        : 0,
-    });
-  } catch (error) {
-    res.status(500).json({ code: 'SERVER_ERROR', message: 'Unable to fetch order.' });
-  }
-}
-
-export async function getUserOrders(req: AuthRequest, res: Response): Promise<void> {
-  try {
-    const userId = req.user?.userId;
-    const orders = await Order.find({ userId }).sort({ createdAt: -1 });
-    res.status(200).json({ success: true, count: orders.length, orders });
-  } catch (error) {
-    res.status(500).json({ code: 'SERVER_ERROR', message: 'Unable to load orders.' });
+    res.status(200).json({ success: true, order });
+  } catch (e) {
+    res.status(500).json({ code: 'SERVER_ERROR', message: 'Failed to fetch order' });
   }
 }

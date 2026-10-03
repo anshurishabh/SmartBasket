@@ -1,44 +1,36 @@
-import { Schema, model, Document } from 'mongoose';
+﻿import { Schema, model, Document } from 'mongoose';
 
 export interface IStore extends Document {
+  storeCode: string; // Specific Store ID (e.g. STORE_LKO_01)
+  passwordHash: string;
   name: string;
+  addressLine: string;
+  phone: string;
   location: {
     type: 'Point';
-    coordinates: [number, number]; // [longitude, latitude]
+    coordinates: [number, number]; // [lng, lat]
   };
   serviceRadiusKm: number;
-  openTime: string; // "06:00"
-  closeTime: string; // "23:59"
-  timezone: string;
-  lastOrderBeforeCloseMin: number;
-  manualStatus: 'OPEN' | 'CLOSED_TEMPORARILY';
+  openTime: string;
+  closeTime: string;
+  isActive: boolean;
 }
 
 const StoreSchema = new Schema<IStore>(
   {
-    name: { type: String, required: true, trim: true },
+    storeCode: { type: String, required: true, unique: true, index: true },
+    passwordHash: { type: String, required: true },
+    name: { type: String, required: true },
+    addressLine: { type: String, required: true, default: 'Dark Store Plot #14, Cyber Heights, Gomti Nagar, Lucknow' },
+    phone: { type: String, required: true, default: '+91 9123456789' },
     location: {
-      type: {
-        type: String,
-        enum: ['Point'],
-        required: true,
-        default: 'Point',
-      },
-      coordinates: {
-        type: [Number],
-        required: true,
-      },
+      type: { type: String, enum: ['Point'], default: 'Point' },
+      coordinates: { type: [Number], required: true },
     },
-    serviceRadiusKm: { type: Number, required: true, default: 5 },
-    openTime: { type: String, required: true, default: '06:00' },
-    closeTime: { type: String, required: true, default: '23:59' },
-    timezone: { type: String, default: 'Asia/Kolkata' },
-    lastOrderBeforeCloseMin: { type: Number, default: 15 },
-    manualStatus: {
-      type: String,
-      enum: ['OPEN', 'CLOSED_TEMPORARILY'],
-      default: 'OPEN',
-    },
+    serviceRadiusKm: { type: Number, default: 5 },
+    openTime: { type: String, default: '06:00' },
+    closeTime: { type: String, default: '23:30' },
+    isActive: { type: Boolean, default: true },
   },
   { timestamps: true }
 );
