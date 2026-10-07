@@ -2,11 +2,15 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import dynamic from 'next/dynamic';
 import { io } from 'socket.io-client';
 import { 
   Bike, Navigation, MapPin, Building2, Phone, 
   ShieldCheck, CheckCircle2, User, LogOut 
 } from 'lucide-react';
+
+// Dynamic import with SSR disabled for Leaflet map
+const LiveRouteMap = dynamic(() => import('@/components/LiveRouteMap'), { ssr: false });
 
 export default function RiderPartnerApp() {
   const router = useRouter();
@@ -18,8 +22,8 @@ export default function RiderPartnerApp() {
   const [rider, setRider] = useState<any | null>(null);
 
   useEffect(() => {
-    const storedUser = localStorage.getItem('sb_user');
-    const token = localStorage.getItem('sb_token');
+    const storedUser = localStorage.getItem('sb_rider_user') || localStorage.getItem('sb_user');
+    const token = localStorage.getItem('sb_rider_token') || localStorage.getItem('sb_token');
     if (!storedUser || !token) {
       router.push('/login');
       return;
@@ -39,29 +43,30 @@ export default function RiderPartnerApp() {
 
   const handleAcceptOffer = async () => {
     if (!offer) return;
-    const token = localStorage.getItem('sb_token');
+    const token = localStorage.getItem('sb_rider_token') || localStorage.getItem('sb_token');
     try {
       const res = await fetch(`http://localhost:5000/api/orders/${offer._id}/accept-rider`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.message);
+      if (!res.ok) throw new Error(data.message || 'Failed to accept delivery offer');
 
       setActiveDelivery({ ...data.order, token });
       setOffer(null);
-    } catch (e) {
-      alert('Failed to accept delivery offer');
+    } catch (e: any) {
+      alert(e.message || 'Failed to accept delivery offer');
     }
   };
 
   const handleVerifyOtp = async () => {
     if (!activeDelivery || !otpInput) return;
     setOtpError(null);
+    const token = localStorage.getItem('sb_rider_token') || localStorage.getItem('sb_token');
     try {
       const res = await fetch(`http://localhost:5000/api/orders/${activeDelivery._id}/verify-otp`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${activeDelivery.token}` },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ otp: otpInput }),
       });
       const data = await res.json();
@@ -72,13 +77,14 @@ export default function RiderPartnerApp() {
       setDelivered(true);
       setActiveDelivery(null);
       setOtpInput('');
-    } catch (e) {
-      setOtpError('Failed to confirm OTP');
+    } catch (e: any) {
+      setOtpError(e.message || 'Failed to confirm OTP');
     }
   };
 
   const handleLogout = () => {
-    localStorage.clear();
+    localStorage.removeItem('sb_rider_token');
+    localStorage.removeItem('sb_rider_user');
     router.push('/login');
   };
 
@@ -89,7 +95,7 @@ export default function RiderPartnerApp() {
           <div className="flex items-center gap-2">
             <Bike className="w-6 h-6 text-amber-400" />
             <div>
-              <h1 className="text-sm font-black">{rider?.name}</h1>
+              <h1 className="text-sm font-black">{rider?.name || 'Speed Rider'}</h1>
               <p className="text-[10px] text-amber-400 font-mono">Bike: {rider?.vehicleNo || 'UP-32-SB-2026'}</p>
             </div>
           </div>
@@ -117,7 +123,15 @@ export default function RiderPartnerApp() {
 
         {activeDelivery && (
           <div className="mt-5 space-y-4">
-            {/* Customer Contact Box */}
+            {/* LIVE ROAD NAVIGATION MAP */}
+            <LiveRouteMap
+              storeCoords={[26.8525, 80.9995]}
+              customerCoords={[26.8480, 81.0080]}
+              riderName={rider?.name || 'Speed Rider'}
+              isRiderView={true}
+            />
+
+            {/* Customer Contact Card */}
             <div className="p-4 rounded-2xl bg-slate-900 border border-slate-800 space-y-3">
               <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-400 flex items-center gap-1">
                 <User className="w-3.5 h-3.5" /> Customer & Delivery Details
@@ -140,7 +154,7 @@ export default function RiderPartnerApp() {
               </p>
             </div>
 
-            {/* Store Contact Box */}
+            {/* Store Contact Card */}
             <div className="p-3.5 rounded-2xl bg-slate-900 border border-slate-800 space-y-2">
               <span className="text-[10px] font-bold uppercase tracking-wider text-blue-400 flex items-center gap-1">
                 <Building2 className="w-3.5 h-3.5" /> Store Dispatch Information
@@ -159,13 +173,13 @@ export default function RiderPartnerApp() {
               </div>
             </div>
 
-            {/* OTP Verification */}
+            {/* OTP Verification Box */}
             <div className="p-4 rounded-2xl bg-slate-900 border border-slate-800">
               <div className="flex items-center gap-1.5 mb-1.5">
                 <ShieldCheck className="w-4 h-4 text-amber-400" />
                 <h4 className="text-xs font-bold">Ask Customer for 4-Digit OTP</h4>
               </div>
-              <p className="text-[11px] text-slate-400 mb-3">Customer screen par display ho raha code enter karein.</p>
+              <p className="text-[11px] text-slate-400 mb-3">Customer's app displays a secure verification code.</p>
 
               <input
                 type="text"
@@ -176,7 +190,7 @@ export default function RiderPartnerApp() {
                 className="w-full bg-slate-950 text-center tracking-widest text-2xl font-black font-mono py-2.5 rounded-xl border border-slate-700 text-emerald-400 focus:outline-none focus:border-emerald-500"
               />
 
-              {otpError && <p className="text-xs text-rose-400 mt-1">{otpError}</p>}
+              {otpError && <p className="text-xs text-rose-400 mt-2 font-medium">{otpError}</p>}
 
               <button
                 onClick={handleVerifyOtp}
